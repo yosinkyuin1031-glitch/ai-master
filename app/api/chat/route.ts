@@ -1,13 +1,16 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 
+// Vercel Serverless Function タイムアウト設定（秒）
+export const maxDuration = 30;
+
 export async function POST(request: Request) {
   const { messages, systemPrompt } = await request.json();
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
-      { error: "ANTHROPIC_API_KEY is not configured" },
+      { error: "ANTHROPIC_API_KEY が設定されていません" },
       { status: 500 }
     );
   }
@@ -34,8 +37,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ content });
   } catch (e) {
+    const errMsg = e instanceof Error ? e.message : "AI処理中にエラーが発生しました";
     return NextResponse.json(
-      { error: e instanceof Error ? e.message : "AI Error" },
+      { error: errMsg },
       { status: 500 }
     );
   }

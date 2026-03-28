@@ -3,7 +3,24 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "治療家AIマスター | 治療院経営を支えるAIアシスタント",
-  description: "症状分析・施術提案・経営アドバイス。治療家のためのAIパートナー。",
+  description: "症状分析・施術提案・経営相談に対応するAIアシスタント。治療家のための専門AI",
+  icons: {
+    icon: "/favicon.ico",
+    shortcut: "/favicon.ico",
+    apple: "/favicon.ico",
+  },
+  openGraph: {
+    title: "治療家AIマスター",
+    description: "症状分析・施術提案・経営相談に対応するAIアシスタント。治療家のための専門AI",
+    siteName: "治療家AIマスター",
+    locale: "ja_JP",
+    type: "website",
+  },
+  twitter: {
+    card: "summary",
+    title: "治療家AIマスター",
+    description: "症状分析・施術提案・経営相談に対応するAIアシスタント。治療家のための専門AI",
+  },
 };
 
 export default function RootLayout({

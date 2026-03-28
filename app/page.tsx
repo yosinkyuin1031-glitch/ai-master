@@ -1,8 +1,13 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import { ToastContainer, useToast } from "./components/ui/Toast";
+
+// レート制限: 1分間に最大10回
+const RATE_LIMIT_MAX = 10;
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
 type Mode = "symptom" | "treatment" | "business";
 type Message = { role: "user" | "assistant"; content: string };
@@ -200,9 +205,13 @@ function LoadingDots() {
 function AssistantMessage({
   content,
   onCopyToast,
+  onRegenerate,
+  isRegenerating,
 }: {
   content: string;
   onCopyToast: () => void;
+  onRegenerate?: () => void;
+  isRegenerating?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -282,8 +291,26 @@ function AssistantMessage({
             </ReactMarkdown>
           </div>
         </div>
-        {/* コピーボタン（ホバー時または常時表示） */}
-        <div className="flex justify-end mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        {/* アクションボタン（ホバー時に表示） */}
+        <div className="flex justify-end gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          {onRegenerate && (
+            <button
+              onClick={onRegenerate}
+              disabled={isRegenerating}
+              title="回答を再生成"
+              aria-label="回答を再生成"
+              className="flex items-center gap-1 text-xs px-2 py-1 rounded-md transition-all bg-gray-100 text-gray-400 hover:text-gray-700 hover:bg-gray-200 disabled:opacity-50"
+            >
+              {isRegenerating ? (
+                <>
+                  <span className="w-3 h-3 border border-gray-400 border-t-transparent rounded-full animate-spin" />
+                  <span>再生成中</span>
+                </>
+              ) : (
+                <span>↻ 再生成</span>
+              )}
+            </button>
+          )}
           <button
             onClick={handleCopy}
             title="回答をコピー"
@@ -314,10 +341,13 @@ export default function Home() {
   });
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [regeneratingIndex, setRegeneratingIndex] = useState<number | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  // レート制限用: 直近のAPI呼び出しタイムスタンプ
+  const apiCallTimestampsRef = useRef<number[]>([]);
 
   const { toasts, addToast, removeToast } = useToast();
 
@@ -352,6 +382,23 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  /** レート制限チェック: 制限内ならtrue、超過ならfalse */
+  const checkRateLimit = useCallback(() => {
+    const now = Date.now();
+    // ウィンドウ外のタイムスタンプを削除
+    apiCallTimestampsRef.current = apiCallTimestampsRef.current.filter(
+      (ts) => now - ts < RATE_LIMIT_WINDOW_MS
+    );
+    if (apiCallTimestampsRef.current.length >= RATE_LIMIT_MAX) {
+      const oldest = apiCallTimestampsRef.current[0];
+      const waitSec = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - oldest)) / 1000);
+      addToast(`送信回数が上限に達しました。約${waitSec}秒後にお試しください。`, "error");
+      return false;
+    }
+    apiCallTimestampsRef.current.push(now);
+    return true;
+  }, [addToast]);
+
   const sendMessage = useCallback(
     async (retryMessages?: Message[]) => {
       const targetMessages = retryMessages ?? messages;
@@ -361,6 +408,9 @@ export default function Home() {
         if (!userMessage || loading) return;
         setInput("");
       }
+
+      // レート制限チェック
+      if (!checkRateLimit()) return;
 
       const newMessages: Message[] = retryMessages ?? [
         ...targetMessages,
@@ -429,7 +479,7 @@ export default function Home() {
         abortControllerRef.current = null;
       }
     },
-    [input, loading, messages, mode, currentMode.systemPrompt, addToast]
+    [input, loading, messages, mode, currentMode.systemPrompt, addToast, checkRateLimit]
   );
 
   const handleRetry = () => {
@@ -442,6 +492,106 @@ export default function Home() {
     const retryMsgs = messages.slice(0, sliceIdx);
     sendMessage(retryMsgs);
   };
+
+  /** 特定のアシスタント回答を再生成 */
+  const handleRegenerate = useCallback(
+    async (assistantIndex: number) => {
+      if (loading || regeneratingIndex !== null) return;
+      if (!checkRateLimit()) return;
+
+      // assistantIndex の直前のユーザーメッセージまでのメッセージを送信
+      const messagesUpToUser = messages.slice(0, assistantIndex);
+
+      setRegeneratingIndex(assistantIndex);
+
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: messagesUpToUser,
+            systemPrompt: currentMode.systemPrompt,
+          }),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!res.ok) {
+          const errorData = await res.json().catch(() => ({}));
+          throw new Error(errorData.error ?? `サーバーエラー (${res.status})`);
+        }
+
+        const data = await res.json();
+        if (data.content) {
+          setConversations((prev) => {
+            const updated = [...prev[mode]];
+            updated[assistantIndex] = { role: "assistant", content: data.content };
+            return { ...prev, [mode]: updated };
+          });
+          addToast("回答を再生成しました", "success");
+        }
+      } catch (err) {
+        clearTimeout(timeoutId);
+        if (err instanceof Error && err.name === "AbortError") {
+          addToast("タイムアウトしました。もう一度お試しください。", "error");
+        } else {
+          const errMsg = err instanceof Error ? err.message : "不明なエラーが発生しました";
+          addToast(`エラー: ${errMsg}`, "error");
+        }
+      } finally {
+        setRegeneratingIndex(null);
+        abortControllerRef.current = null;
+      }
+    },
+    [loading, regeneratingIndex, messages, mode, currentMode.systemPrompt, addToast, checkRateLimit]
+  );
+
+  /** 会話をテキスト形式でエクスポート */
+  const handleExport = useCallback(() => {
+    if (messages.length === 0) {
+      addToast("エクスポートできる会話がありません", "info");
+      return;
+    }
+    const now = new Date();
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const timeStr = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+
+    const lines: string[] = [
+      `【${currentMode.label}モード】${dateStr} ${timeStr}`,
+      "",
+      "=" .repeat(40),
+      "",
+    ];
+
+    messages.forEach((msg) => {
+      if (msg.role === "user") {
+        lines.push(`Q: ${msg.content}`);
+      } else {
+        lines.push(`A: ${msg.content}`);
+      }
+      lines.push("");
+    });
+
+    lines.push("=" .repeat(40));
+    lines.push("治療家AIマスター / 株式会社ROLE OWL");
+
+    const text = lines.join("\n");
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ai-master_${currentMode.key}_${dateStr}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    addToast("会話をエクスポートしました", "success");
+  }, [messages, currentMode, addToast]);
 
   const clearChat = () => {
     setShowClearConfirm(true);
@@ -485,13 +635,22 @@ export default function Home() {
         </div>
         <div className="flex items-center gap-3">
           {messages.length > 0 && (
-            <button
-              onClick={clearChat}
-              className="text-sm text-gray-400 hover:text-red-500 transition-colors"
-              aria-label={`${currentMode.label}の会話をクリア`}
-            >
-              会話をクリア
-            </button>
+            <>
+              <button
+                onClick={handleExport}
+                className="text-sm text-gray-400 hover:text-blue-500 transition-colors"
+                aria-label="会話をテキストファイルでエクスポート"
+              >
+                エクスポート
+              </button>
+              <button
+                onClick={clearChat}
+                className="text-sm text-gray-400 hover:text-red-500 transition-colors"
+                aria-label={`${currentMode.label}の会話をクリア`}
+              >
+                会話をクリア
+              </button>
+            </>
           )}
         </div>
       </header>
@@ -603,6 +762,8 @@ export default function Home() {
               key={i}
               content={msg.content}
               onCopyToast={handleCopyToast}
+              onRegenerate={() => handleRegenerate(i)}
+              isRegenerating={regeneratingIndex === i}
             />
           )
         )}
@@ -673,6 +834,15 @@ export default function Home() {
           Enter で送信　Shift+Enter で改行　会話はブラウザに自動保存されます
         </p>
       </div>
+
+      {/* Footer */}
+      <footer className="bg-white border-t px-4 py-2 flex-shrink-0">
+        <div className="flex items-center justify-center gap-4 text-xs text-gray-300">
+          <span>© 2026 株式会社ROLE OWL</span>
+          <Link href="/terms" className="hover:text-gray-500 transition-colors">利用規約</Link>
+          <Link href="/privacy" className="hover:text-gray-500 transition-colors">プライバシーポリシー</Link>
+        </div>
+      </footer>
     </div>
   );
 }

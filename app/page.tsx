@@ -4,6 +4,8 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import { ToastContainer, useToast } from "./components/ui/Toast";
+import { createClient } from "./lib/supabase/client";
+import { loadConversations, saveConversation, clearConversation } from "./lib/conversationApi";
 
 // レート制限: 1分間に最大10回
 const RATE_LIMIT_MAX = 10;
@@ -185,7 +187,7 @@ const MODES: {
   },
 ];
 
-const STORAGE_KEY = "aimaster_conversations_v1";
+const supabase = createClient();
 
 function LoadingDots() {
   return (
@@ -344,39 +346,47 @@ export default function Home() {
   const [regeneratingIndex, setRegeneratingIndex] = useState<number | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [clinicName, setClinicName] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   // レート制限用: 直近のAPI呼び出しタイムスタンプ
   const apiCallTimestampsRef = useRef<number[]>([]);
+  // DB保存の重複防止
+  const savingRef = useRef<Record<string, boolean>>({});
 
   const { toasts, addToast, removeToast } = useToast();
 
   const currentMode = MODES.find((m) => m.key === mode)!;
   const messages = conversations[mode];
 
-  // LocalStorageから会話を復元
+  // Supabaseから会話を復元 + ユーザー情報取得
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        setConversations(parsed);
+    async function init() {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user?.user_metadata?.clinic_name) {
+          setClinicName(user.user_metadata.clinic_name);
+        }
+        const saved = await loadConversations();
+        setConversations(saved);
+      } catch {
+        // 読み込み失敗は無視
       }
-    } catch {
-      // パース失敗は無視
+      setHydrated(true);
     }
-    setHydrated(true);
+    init();
   }, []);
 
-  // 会話が変わったらLocalStorageに保存
+  // 会話が変わったらSupabaseに保存
   useEffect(() => {
     if (!hydrated) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
-    } catch {
-      // ストレージ容量不足等は無視
-    }
-  }, [conversations, hydrated]);
+    const key = mode;
+    if (savingRef.current[key]) return;
+    savingRef.current[key] = true;
+    saveConversation(mode, conversations[mode]).finally(() => {
+      savingRef.current[key] = false;
+    });
+  }, [conversations, hydrated, mode]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -599,8 +609,14 @@ export default function Home() {
 
   const confirmClearChat = () => {
     setConversations((prev) => ({ ...prev, [mode]: [] }));
+    clearConversation(mode);
     setShowClearConfirm(false);
     addToast("会話履歴をクリアしました", "info");
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
   };
 
   const handleCopyToast = () => {
@@ -631,7 +647,7 @@ export default function Home() {
       <header className="bg-white border-b px-4 py-3 flex items-center justify-between flex-shrink-0 shadow-sm">
         <div>
           <h1 className="text-lg font-black text-gray-800">治療家AIマスター</h1>
-          <p className="text-xs text-gray-400">AI-powered Clinical Assistant</p>
+          <p className="text-xs text-gray-400">{clinicName ? `${clinicName}` : "ClinicApps"}</p>
         </div>
         <div className="flex items-center gap-3">
           {messages.length > 0 && (
@@ -652,6 +668,13 @@ export default function Home() {
               </button>
             </>
           )}
+          <button
+            onClick={handleLogout}
+            className="text-xs text-gray-400 hover:text-red-500 transition-colors"
+            aria-label="ログアウト"
+          >
+            ログアウト
+          </button>
         </div>
       </header>
 
@@ -831,7 +854,7 @@ export default function Home() {
           </button>
         </div>
         <p className="text-center text-xs text-gray-300 mt-2">
-          Enter で送信　Shift+Enter で改行　会話はブラウザに自動保存されます
+          Enter で送信　Shift+Enter で改行　会話はクラウドに自動保存されます
         </p>
       </div>
 

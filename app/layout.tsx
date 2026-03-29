@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "治療家AIマスター | 治療院経営を支えるAIアシスタント",
+  title: "治療家AIマスター | ClinicApps",
   description: "症状分析・施術提案・経営相談に対応するAIアシスタント。治療家のための専門AI",
   icons: {
     icon: "/favicon.ico",
